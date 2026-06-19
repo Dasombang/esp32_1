@@ -7,11 +7,10 @@
 #include "time.h"
 #include "secrets.h"
 
-// 와이파이 및 날씨 설정 가져오기
+// secrets.h에서 설정 값 가져오기
 const char* ssid     = SECRET_SSID;
 const char* password = SECRET_PASSWORD;
 const char* apiKey   = SECRET_API_KEY;
-const char* city     = SECRET_CITY;
 
 // 대한민국 시간 설정 (UTC+9)
 const long  gmtOffset_sec = 32400;
@@ -21,15 +20,28 @@ const char* ntpServer = "pool.ntp.org";
 // ST7567A 하드웨어 SPI 디스플레이 설정
 U8G2_ST7567_OS12864_F_4W_HW_SPI u8g2(U8G2_R0, /* cs=*/ 5, /* dc=*/ 21, /* reset=*/ 22);
 
-// 전역 변수 설정
+// -------------------------------------------------------------
+// [애니메이션 모드 선택] 1: 팩맨과 유령 | 2: 아장아장 고양이 | 3: 통통 하트
+// -------------------------------------------------------------
+const int ANIMATION_MODE = 1; 
+
+// 전역 변수
 int lastSecond = -1;
 unsigned long lastWeatherCheck = 0;
-const unsigned long weatherInterval = 600000; // 날씨 갱신 주기: 10분 (600,000ms)
+const unsigned long weatherInterval = 600000; 
 
-String weatherMain = "---";  // 날씨 상태 (Clear, Clouds, Rain 등)
-float temperature = 0.0;     // 현재 온도
+String currentCity = "Seoul";   
+String weatherMain = "---";     
+float temperature = 0.0;        
+int humidity = 0;               
 
-// Wi-Fi 연결 함수
+// 애니메이션 제어 변수 (여러 마리가 등장하므로 이동 가능 범위를 연장)
+int iconX = 6;           
+int iconDirection = 1;    
+unsigned long lastIconUpdate = 0;
+const unsigned long iconInterval = 50; // 50ms (0.05초)마다 움직임 갱신
+int animFrame = 0;        
+
 void connectWiFi() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x10_tf);
@@ -52,70 +64,214 @@ void connectWiFi() {
   }
 }
 
-// 인터넷에서 날씨 정보를 가져오는 함수
+void getCurrentCity() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin("http://ip-api.com/json/?lang=en"); 
+    int httpCode = http.GET();
+    
+    if (httpCode == HTTP_CODE_OK) {
+      String payload = http.getString();
+      JsonDocument doc;
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (!error) {
+        String status = doc["status"].as<String>();
+        if (status == "success") {
+          currentCity = doc["city"].as<String>();
+          return;
+        }
+      }
+    }
+    currentCity = "Seoul"; 
+  }
+}
+
 void getWeatherData() {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    // API 요청 URL 생성 (섭씨 온도를 위해 &units=metric 추가)
-    String url = "http://api.openweathermap.org/data/2.5/weather?q=" + String(city) + "&appid=" + String(apiKey) + "&units=metric";
+    String url = "http://api.openweathermap.org/data/2.5/weather?q=" + currentCity + "&appid=" + String(apiKey) + "&units=metric";
     
     http.begin(url);
     int httpCode = http.GET();
     
-    if (httpCode > 0) {
+    if (httpCode == HTTP_CODE_OK) { 
       String payload = http.getString();
-      
-      // JSON 파싱을 위한 메모리 할당 (OpenWeatherMap 응답 크기에 맞춤)
       JsonDocument doc;
       DeserializationError error = deserializeJson(doc, payload);
       
       if (!error) {
         weatherMain = doc["weather"][0]["main"].as<String>();
         temperature = doc["main"]["temp"].as<float>();
-        Serial.printf("Weather Updated: %s, %.1f C\n", weatherMain.c_str(), temperature);
-      } else {
-        Serial.print("JSON Parsing failed: ");
-        Serial.println(error.c_str());
+        humidity = doc["main"]["humidity"].as<int>();
       }
-    } else {
-      Serial.println("Error on HTTP request");
     }
     http.end();
   }
 }
 
-// 디스플레이 출력 함수 (날짜, 시간, 날씨 배치 조정)
+// -------------------------------------------------------------
+// [수정 완료] 팩맨 도망 시 입 벌림 적용 함수
+// -------------------------------------------------------------
+void drawPacman(int x, int dir) {
+  int baseY = 33;
+  
+  if (dir == 1) {
+    // ➡️ 1단계: 우측 이동 (먹이 먹기)
+    
+    // 먹이 점 배치
+    for (int dotX = 12; dotX < 120; dotX += 12) {
+      if (dotX > x + 3) { 
+        u8g2.drawPixel(dotX, baseY);
+      }
+    }
+
+    // 팩맨 본체 (우측 입)
+    u8g2.drawDisc(x, baseY, 3);
+    u8g2.setDrawColor(0);
+    u8g2.drawTriangle(x, baseY, x + 4, baseY - 2, x + 4, baseY + 2); 
+    u8g2.setDrawColor(1);
+
+  } else {
+    // ⬅️ 2단계: 좌측 이동 (유령 체이스 - 도망)
+    
+    // 👈 선두에서 도망치는 팩맨 (좌측을 바라보며 입이 쩍 벌어진 상태 고정)
+    u8g2.drawDisc(x, baseY, 3);
+    
+    // 입 모양 탈루 (왼쪽으로 향하도록 좌표 계산)
+    u8g2.setDrawColor(0);
+    u8g2.drawTriangle(x, baseY, x - 4, baseY - 2, x - 4, baseY + 2); 
+    u8g2.setDrawColor(1);
+
+    // 16픽셀 뒤에서 따라오는 유령
+    int ghostX = x + 16; 
+    
+    u8g2.drawBox(ghostX - 2, baseY - 1, 5, 4);      
+    u8g2.drawPixel(ghostX - 1, baseY - 2);          
+    u8g2.drawPixel(ghostX, baseY - 2);
+    u8g2.drawPixel(ghostX + 1, baseY - 2);
+    u8g2.drawPixel(ghostX - 3, baseY);              
+    u8g2.drawPixel(ghostX + 3, baseY);
+    
+    if (animFrame % 2 == 0) {
+      u8g2.drawPixel(ghostX - 2, baseY + 3);
+      u8g2.drawPixel(ghostX, baseY + 3);
+      u8g2.drawPixel(ghostX + 2, baseY + 3);
+    } else {
+      u8g2.drawPixel(ghostX - 1, baseY + 3);
+      u8g2.drawPixel(ghostX + 1, baseY + 3);
+    }
+  }
+}
+
+// -------------------------------------------------------------
+// 아장아장 고양이 애니메이션 함수
+// -------------------------------------------------------------
+void drawCat(int x, int dir) {
+  int baseY = 33;
+  
+  if (dir == 1) {
+    u8g2.drawBox(x - 3, baseY - 1, 5, 3); 
+    u8g2.drawBox(x + 2, baseY - 3, 3, 3); 
+    u8g2.drawPixel(x + 2, baseY - 4);
+    u8g2.drawPixel(x + 4, baseY - 4);
+    u8g2.drawVLine(x - 4, baseY - 3, 3); 
+
+    if (animFrame % 2 == 0) {
+      u8g2.drawPixel(x - 2, baseY + 2);
+      u8g2.drawPixel(x + 1, baseY + 2);
+    } else {
+      u8g2.drawPixel(x - 3, baseY + 2);
+      u8g2.drawPixel(x + 2, baseY + 2);
+    }
+  } else {
+    u8g2.drawBox(x - 2, baseY - 1, 5, 3); 
+    u8g2.drawBox(x - 5, baseY - 3, 3, 3); 
+    u8g2.drawPixel(x - 5, baseY - 4);
+    u8g2.drawPixel(x - 3, baseY - 4);
+    u8g2.drawVLine(x + 3, baseY - 3, 3); 
+
+    if (animFrame % 2 == 0) {
+      u8g2.drawPixel(x - 3, baseY + 2);
+      u8g2.drawPixel(x + 1, baseY + 2);
+    } else {
+      u8g2.drawPixel(x - 4, baseY + 2);
+      u8g2.drawPixel(x, baseY + 2);
+    }
+  }
+}
+
+// -------------------------------------------------------------
+// 통통 튀는 하트 애니메이션 함수
+// -------------------------------------------------------------
+void drawBouncingHeart(int x) {
+  int bounceY = 32 + (int)(sin(x * 0.2) * 3);
+  u8g2.drawPixel(x - 1, bounceY - 2);
+  u8g2.drawPixel(x + 1, bounceY - 2);
+  u8g2.drawBox(x - 2, bounceY - 1, 5, 2);
+  u8g2.drawBox(x - 1, bounceY + 1, 3, 1);
+  u8g2.drawPixel(x, bounceY + 2);
+}
+
+// -------------------------------------------------------------
+// 애니메이션 핑퐁 제어 및 모드 분기 핸들러
+// -------------------------------------------------------------
+void handleAnimation() {
+  iconX += iconDirection;
+  animFrame++;
+
+  // 두 마리가 같이 움직이는 것을 고려하여 최대 바운더리 마진 최적화
+  int maxRight = (ANIMATION_MODE == 1) ? 100 : 114; 
+  int minLeft = 10;
+
+  if (iconX >= maxRight) {
+    iconX = maxRight;
+    iconDirection = -1;
+  } else if (iconX <= minLeft) {
+    iconX = minLeft;
+    iconDirection = 1;
+  }
+
+  switch (ANIMATION_MODE) {
+    case 1: drawPacman(iconX, iconDirection); break;
+    case 2: drawCat(iconX, iconDirection); break;
+    case 3: drawBouncingHeart(iconX); break;
+    default: u8g2.drawHLine(iconX - 4, 33, 8); break;
+  }
+}
+
+// -------------------------------------------------------------
+// 디스플레이 통합 출력 함수
+// -------------------------------------------------------------
 void displayAllInfo(struct tm timeinfo) {
   u8g2.clearBuffer();
 
-  // 1. 날짜 표시 (상단 가운데 정렬)
-  char dateBuffer[20];
-  sprintf(dateBuffer, "%04d-%02d-%02d", timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
-  u8g2.setFont(u8g2_font_6x10_tf); // 시간과 날씨 공간 확보를 위해 살짝 작은 폰트 적용
-  int dateStrWidth = u8g2.getStrWidth(dateBuffer);
-  u8g2.drawStr((128 - dateStrWidth) / 2, 12, dateBuffer);
-
-  // 2. 시간 표시 (중앙 정렬, 큼직하게)
-  char timeBuffer[15];
-  sprintf(timeBuffer, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-  u8g2.setFont(u8g2_font_fur14_tf); 
-  int timeStrWidth = u8g2.getStrWidth(timeBuffer);
-  u8g2.drawStr((128 - timeStrWidth) / 2, 36, timeBuffer);
-
-  // 구분선 그리기
-  u8g2.drawHLine(0, 42, 128);
-
-  // 3. 날씨 정보 표시 (하단 영역 배치)
-  u8g2.setFont(u8g2_font_6x10_tf);
+  // [1단] 날짜와 시간 표시 (7x14B Bold 적용)
+  char dateTimeBuffer[30];
+  sprintf(dateTimeBuffer, "%02d-%02d  %02d:%02d:%02d", 
+          timeinfo.tm_mon + 1, timeinfo.tm_mday, 
+          timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   
-  // 왼쪽: 날씨 상태 (예: Clear, Rain)
-  u8g2.drawStr(5, 58, weatherMain.c_str());
-  
-  // 오른쪽: 온도 표시 (예: 24.5 C)
-  char tempBuffer[10];
-  sprintf(tempBuffer, "%.1f C", temperature);
-  int tempStrWidth = u8g2.getStrWidth(tempBuffer);
-  u8g2.drawStr(123 - tempStrWidth, 58, tempBuffer);
+  //u8g2.setFont(u8g2_font_7x14B_tf);
+  u8g2.setFont(u8g2_font_7x14B_mn);  
+
+  int dateTimeWidth = u8g2.getStrWidth(dateTimeBuffer);
+  u8g2.drawStr((128 - dateTimeWidth) / 2, 20, dateTimeBuffer);
+
+  // [중앙단] 수정된 애니메이션 탑재
+  handleAnimation();
+
+  // [2단] 현재 지역 표시 (Y=44)
+  u8g2.setFont(u8g2_font_6x10_tf); 
+  int cityStrWidth = u8g2.getStrWidth(currentCity.c_str());
+  u8g2.drawStr((128 - cityStrWidth) / 2, 44, currentCity.c_str());
+
+  // [3단] 최하단 날씨, 온도, 습도 표시 (Y=58)
+  char weatherBuffer[30];
+  sprintf(weatherBuffer, "%s  %.1fC  %d%%", weatherMain.c_str(), temperature, humidity);
+  u8g2.setFont(u8g2_font_6x10_tf); 
+  int weatherStrWidth = u8g2.getStrWidth(weatherBuffer);
+  u8g2.drawStr((128 - weatherStrWidth) / 2, 58, weatherBuffer);
 
   u8g2.sendBuffer();
 }
@@ -124,17 +280,15 @@ void setup() {
   Serial.begin(115200);
   u8g2.begin();  
   
-  connectWiFi();
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  
-  // 부팅 시 날씨를 즉시 한 번 가져옵니다.
-  getWeatherData();
+  connectWiFi();        
+  getCurrentCity();     
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); 
+  getWeatherData();     
 }
 
 void loop() {
   unsigned long currentMillis = millis();
   
-  // 10분마다 날씨 정보 데이터 동기화
   if (currentMillis - lastWeatherCheck >= weatherInterval) {
     lastWeatherCheck = currentMillis;
     getWeatherData();
@@ -145,11 +299,8 @@ void loop() {
     return;
   }
 
-  // 1초마다 시간 및 화면 업데이트
-  if (timeinfo.tm_sec != lastSecond) {
-    lastSecond = timeinfo.tm_sec;
-    displayAllInfo(timeinfo);
+  if (currentMillis - lastIconUpdate >= iconInterval) {
+    lastIconUpdate = currentMillis;
+    displayAllInfo(timeinfo); 
   }
-  
-  delay(200); 
 }
