@@ -252,7 +252,6 @@ void displayAllInfo(struct tm timeinfo) {
           timeinfo.tm_mon + 1, timeinfo.tm_mday, 
           timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   
-  //u8g2.setFont(u8g2_font_7x14B_tf);
   u8g2.setFont(u8g2_font_7x14B_mn);  
 
   int dateTimeWidth = u8g2.getStrWidth(dateTimeBuffer);
@@ -268,7 +267,7 @@ void displayAllInfo(struct tm timeinfo) {
 
   // [3단] 최하단 날씨, 온도, 습도 표시 (Y=58)
   char weatherBuffer[30];
-  sprintf(weatherBuffer, "%s  %.1fC  %d%%", weatherMain.c_str(), temperature, humidity);
+  sprintf(weatherBuffer, "%s  %.1f\xb0" "C  %d%%", weatherMain.c_str(), temperature, humidity);
   u8g2.setFont(u8g2_font_6x10_tf); 
   int weatherStrWidth = u8g2.getStrWidth(weatherBuffer);
   u8g2.drawStr((128 - weatherStrWidth) / 2, 58, weatherBuffer);
