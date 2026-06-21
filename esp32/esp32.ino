@@ -7,22 +7,6 @@
 #include "time.h"
 #include "secrets.h"
 
-/*
-ESP32용 WiFi 라이브러리(WiFi.h) 내부에서 미리 정의된 상태 값
-typedef enum {
-    WL_NO_SHIELD        = 255,   // WiFi 실드가 없음
-    WL_IDLE_STATUS      = 0,     // 유휴 상태
-    WL_NO_SSID_AVAIL    = 1,     // SSID를 찾을 수 없음
-    WL_SCAN_COMPLETED   = 2,     // 스캔 완료
-    WL_CONNECTED        = 3,     // 연결 성공
-    WL_CONNECT_FAILED   = 4,     // 연결 실패
-    WL_CONNECTION_LOST  = 5,     // 연결 끊김
-    WL_DISCONNECTED     = 6      // 연결 해제됨
-} wl_status_t;
-
-
-*/
-
 // secrets.h 설정 값
 const char* ssid     = SECRET_SSID;
 const char* password = SECRET_PASSWORD;
@@ -35,10 +19,8 @@ const char* ntpServer = "pool.ntp.org";
 
 // 폰트 정의
 const uint8_t* TIME_FONT = u8g2_font_7x14B_mn;
-const uint8_t* LOGO_FONT = u8g2_font_9x18B_tf;//u8g2_font_courB10_tf
+const uint8_t* LOGO_FONT = u8g2_font_9x18B_tf;
 const uint8_t* MSG_FONT = u8g2_font_5x8_tf;
-//const uint8_t* ICON_FONT = u8g2_font_open_iconic_embedded_1x_t;
-
 
 // ST7567A 하드웨어 SPI 디스플레이 설정
 U8G2_ST7567_OS12864_F_4W_HW_SPI u8g2(U8G2_R0, /* cs=*/ 5, /* dc=*/ 21, /* reset=*/ 22);
@@ -51,7 +33,7 @@ unsigned long lastWeatherCheck = 0;
 const unsigned long weatherInterval = 600000; 
 
 // 타임아웃 및 점 개수 설정 변수
-const unsigned long TIMEOUT_MS = 10000; //30000
+const unsigned long TIMEOUT_MS = 10000; 
 const int MAX_DOTS = 3;
 
 String currentCity = "Seoul";   
@@ -59,13 +41,13 @@ String weatherMain = "---";
 float temperature = 0.0;        
 int humidity = 0;               
 
-// 통신 에러 플래그 (도시나 날씨 실패 시 true)
+// 통신 에러 플래그
 bool hasCommunicationError = false;
 
-int iconX = 6;           
+int iconX = 12;           // 시작 경계값 에러 방지를 위해 6에서 12로 안전 조정
 int iconDirection = 1;    
 unsigned long lastIconUpdate = 0;
-const unsigned long iconInterval = 50; 
+const unsigned long iconInterval = 60; 
 int animFrame = 0;        
 
 // 하위 함수 전방 선언
@@ -121,7 +103,6 @@ void connectWiFi() {
   while (WiFi.status() != WL_CONNECTED) {
     if (millis() - startAttemptTime >= TIMEOUT_MS) {
       updateStatus(failMsg, 0);
-      Serial.println("WiFi Connection Timeout! Program Halted.");
       while (true) { delay(1000); } 
     }
 
@@ -139,188 +120,171 @@ void connectWiFi() {
     }
     delay(10);
   }
-
-  Serial.println(""); // 줄바꿈
-  Serial.print("WiFi Connected! ");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP()); // IPAddress 객체를 직접 출력
 }
 
 void getCurrentCity() {
-  if (WiFi.status() == WL_CONNECTED) {
-    const char* statusMsg = "Finding City";
+  if (WiFi.status() != WL_CONNECTED) return;
 
-    HTTPClient http;
-    http.begin("http://ip-api.com/json/?lang=en"); 
-    
-    int dotCount = 0;
-    unsigned long lastUpdate = 0;
-    
-    u8g2.setFont(MSG_FONT);
-    int msgWidth = u8g2.getStrWidth(statusMsg);
-    int totalWidth = msgWidth + 2 + (MAX_DOTS * 4);
-    int msgX = (128 - totalWidth) / 2;
+  const char* statusMsg = "Finding City";
+  HTTPClient http;
+  http.begin("http://ip-api.com/json/?lang=en"); 
+  
+  int dotCount = 0;
+  unsigned long lastUpdate = 0;
+  
+  u8g2.setFont(MSG_FONT);
+  int msgWidth = u8g2.getStrWidth(statusMsg);
+  int totalWidth = msgWidth + 2 + (MAX_DOTS * 4);
+  int msgX = (128 - totalWidth) / 2;
 
-    unsigned long startActionTime = millis();
-    while (http.connected() == false && (millis() - startActionTime < 2000)) {
-      if (millis() - lastUpdate >= 300) {
-        lastUpdate = millis();
-        u8g2.clearBuffer();
-        drawIntroLogo();
-        u8g2.setFont(MSG_FONT);
-        u8g2.drawStr(msgX, 52, statusMsg);
-        for (int i = 0; i < dotCount; i++) {
-          u8g2.drawStr(msgX + msgWidth + 2 + (i * 4), 52, ".");
-        }
-        u8g2.sendBuffer();
-        dotCount = (dotCount + 1) % (MAX_DOTS + 1);
+  unsigned long startActionTime = millis();
+  while (!http.connected() && (millis() - startActionTime < 2000)) {
+    if (millis() - lastUpdate >= 300) {
+      lastUpdate = millis();
+      u8g2.clearBuffer();
+      drawIntroLogo();
+      u8g2.setFont(MSG_FONT);
+      u8g2.drawStr(msgX, 52, statusMsg);
+      for (int i = 0; i < dotCount; i++) {
+        u8g2.drawStr(msgX + msgWidth + 2 + (i * 4), 52, ".");
       }
-      delay(10);
+      u8g2.sendBuffer();
+      dotCount = (dotCount + 1) % (MAX_DOTS + 1);
     }
-
-    int httpCode = http.GET();
-    if (httpCode == HTTP_CODE_OK) {
-      String payload = http.getString();
-      JsonDocument doc;
-      DeserializationError error = deserializeJson(doc, payload);
-      if (!error) {
-        String status = doc["status"].as<String>();
-        if (status == "success") {
-          currentCity = doc["city"].as<String>();
-          // hasCommunicationError = false; 
-          Serial.println("Successfully found the city. The name of the city is " + currentCity + ".");
-          http.end();
-          return;
-        }
-      }
-    }
-    http.end();
-    //currentCity = "Seoul"; 
-    hasCommunicationError = true;
-    Serial.println("Failed to find the city! Set to Seoul.");
+    delay(10);
   }
+
+  int httpCode = http.GET();
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error) {
+      String status = doc["status"].as<String>();
+      if (status == "success") {
+        currentCity = doc["city"].as<String>();
+        hasCommunicationError = false;
+        http.end(); // 정상 종료시 자원 해제
+        return;
+      }
+    }
+  }
+  
+  // 에러 발생 케이스 가드: 무조건 자원 해제 보장
+  http.end(); 
+  hasCommunicationError = true;
 }
 
 void syncTime() {
-  if (WiFi.status() == WL_CONNECTED) {
-    const char* statusMsg = "Syncing Time";
-    const char* failMsg   = "Time Sync Failed";
+  if (WiFi.status() != WL_CONNECTED) return;
 
-    int dotCount = 0;
-    unsigned long lastUpdate = 0;
-    unsigned long startAttemptTime = millis();
-    
-    u8g2.setFont(MSG_FONT);
-    int msgWidth = u8g2.getStrWidth(statusMsg);
-    int totalWidth = msgWidth + 2 + (MAX_DOTS * 4);
-    int msgX = (128 - totalWidth) / 2;
+  const char* statusMsg = "Syncing Time";
+  const char* failMsg   = "Time Sync Failed";
 
-    // 1. 고정 문구 즉시 출력 (기존 방식 유지)
-    u8g2.clearBuffer();
-    drawIntroLogo();
-    u8g2.setFont(MSG_FONT);
-    u8g2.drawStr(msgX, 52, statusMsg);
-    u8g2.sendBuffer();
-    
-    // 2. 점 3개 노출 애니메이션 (기존 configTime 전 1회 실행)
-    for (int i = 1; i <= MAX_DOTS; i++) {
-      delay(300);
-      u8g2.drawStr(msgX + msgWidth + 2 + ((i - 1) * 4), 52, ".");
+  int dotCount = 0;
+  unsigned long lastUpdate = 0;
+  unsigned long startAttemptTime = millis();
+  
+  u8g2.setFont(MSG_FONT);
+  int msgWidth = u8g2.getStrWidth(statusMsg);
+  int totalWidth = msgWidth + 2 + (MAX_DOTS * 4);
+  int msgX = (128 - totalWidth) / 2;
+
+  u8g2.clearBuffer();
+  drawIntroLogo();
+  u8g2.setFont(MSG_FONT);
+  u8g2.drawStr(msgX, 52, statusMsg);
+  u8g2.sendBuffer();
+  
+  for (int i = 1; i <= MAX_DOTS; i++) {
+    delay(300);
+    u8g2.drawStr(msgX + msgWidth + 2 + ((i - 1) * 4), 52, ".");
+    u8g2.sendBuffer(); 
+  }
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  struct tm timeinfo;
+  
+  while (!getLocalTime(&timeinfo)) {
+    if (millis() - startAttemptTime >= TIMEOUT_MS) {
+      updateStatus(failMsg, 0);
+      delay(2000);
+      ESP.restart();
+    }
+
+    if (millis() - lastUpdate >= 300) {
+      lastUpdate = millis();
+      u8g2.clearBuffer();
+      drawIntroLogo();
+      u8g2.setFont(MSG_FONT);
+      u8g2.drawStr(msgX, 52, statusMsg);
+      
+      for (int i = 0; i < dotCount; i++) {
+        u8g2.drawStr(msgX + msgWidth + 2 + (i * 4), 52, ".");
+      }
       u8g2.sendBuffer();
+      dotCount = (dotCount + 1) % (MAX_DOTS + 1);
     }
-
-    // 3. NTP 시간 동기화 시작 (요청하신 위치)
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
-    struct tm timeinfo;
-    
-    // 4. 시간 동기화 성공 시까지 애니메이션 루프 (기존 로직 유지)
-    while (!getLocalTime(&timeinfo)) {
-      // 30초 타임아웃 발생 시 실패 메시지 출력 후 재시작 (기존 로직 유지)
-      if (millis() - startAttemptTime >= TIMEOUT_MS) {
-        updateStatus(failMsg, 0);
-        Serial.println("NTP Time Sync Timeout! Restarting...");
-        delay(2000);
-        ESP.restart();
-      }
-
-      // 5. 300ms 주기로 점 애니메이션 갱신 (기존 로직 유지)
-      if (millis() - lastUpdate >= 300) {
-        lastUpdate = millis();
-        u8g2.clearBuffer();
-        drawIntroLogo();
-        u8g2.setFont(MSG_FONT);
-        u8g2.drawStr(msgX, 52, statusMsg);
-        
-        for (int i = 0; i < dotCount; i++) {
-          u8g2.drawStr(msgX + msgWidth + 2 + (i * 4), 52, ".");
-        }
-        u8g2.sendBuffer();
-        dotCount = (dotCount + 1) % (MAX_DOTS + 1);
-      }
-      delay(10);
-    }
-    Serial.println("Time synchronization successful.");
+    delay(10);
   }
 }
 
 void getWeatherData() {
-  if (WiFi.status() == WL_CONNECTED) {
-    const char* statusMsg = "Loading Weather";
+  if (WiFi.status() != WL_CONNECTED) return;
 
-    HTTPClient http;
-    String url = "http://api.openweathermap.org/data/2.5/weather?q=" + currentCity + "&appid=" + String(apiKey) + "&units=metric";
-    http.begin(url);
-    
-    int dotCount = 0;
-    unsigned long lastUpdate = 0;
-    
-    u8g2.setFont(MSG_FONT);
-    int msgWidth = u8g2.getStrWidth(statusMsg);
-    int totalWidth = msgWidth + 2 + (MAX_DOTS * 4);
-    int msgX = (128 - totalWidth) / 2;
+  const char* statusMsg = "Loading Weather";
+  HTTPClient http;
+  String url = "http://api.openweathermap.org/data/2.5/weather?q=" + currentCity + "&appid=" + String(apiKey) + "&units=metric";
+  http.begin(url);
+  
+  int dotCount = 0;
+  unsigned long lastUpdate = 0;
+  
+  u8g2.setFont(MSG_FONT);
+  int msgWidth = u8g2.getStrWidth(statusMsg);
+  int totalWidth = msgWidth + 2 + (MAX_DOTS * 4);
+  int msgX = (128 - totalWidth) / 2;
 
-    unsigned long startActionTime = millis();
-    while (http.connected() == false && (millis() - startActionTime < 2000)) {
-      if (millis() - lastUpdate >= 300) {
-        lastUpdate = millis();
-        u8g2.clearBuffer();
-        drawIntroLogo();
-        u8g2.setFont(MSG_FONT);
-        u8g2.drawStr(msgX, 52, statusMsg);
-        for (int i = 0; i < dotCount; i++) {
-          u8g2.drawStr(msgX + msgWidth + 2 + (i * 4), 52, ".");
-        }
-        u8g2.sendBuffer();
-        dotCount = (dotCount + 1) % (MAX_DOTS + 1);
+  unsigned long startActionTime = millis();
+  while (!http.connected() && (millis() - startActionTime < 2000)) {
+    if (millis() - lastUpdate >= 300) {
+      lastUpdate = millis();
+      u8g2.clearBuffer();
+      drawIntroLogo();
+      u8g2.setFont(MSG_FONT);
+      u8g2.drawStr(msgX, 52, statusMsg);
+      for (int i = 0; i < dotCount; i++) {
+        u8g2.drawStr(msgX + msgWidth + 2 + (i * 4), 52, ".");
       }
-      delay(10);
+      u8g2.sendBuffer();
+      dotCount = (dotCount + 1) % (MAX_DOTS + 1);
     }
-
-    int httpCode = http.GET();
-    if (httpCode == HTTP_CODE_OK) { 
-      String payload = http.getString();
-      JsonDocument doc;
-      DeserializationError error = deserializeJson(doc, payload);
-      if (!error) {
-        weatherMain = doc["weather"][0]["main"].as<String>();
-        temperature = doc["main"]["temp"].as<float>();
-        humidity = doc["main"]["humidity"].as<int>();
-        // hasCommunicationError = false;
-        http.end();
-        Serial.println("Weather information loading successful.");
-        return; 
-      }
-    }
-    http.end();
-    weatherMain = "---";
-    hasCommunicationError = true;
-    Serial.println("Failed to get weather information.");
+    delay(10);
   }
+
+  int httpCode = http.GET();
+  if (httpCode == HTTP_CODE_OK) { 
+    String payload = http.getString();
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error) {
+      weatherMain = doc["weather"][0]["main"].as<String>();
+      temperature = doc["main"]["temp"].as<float>();
+      humidity = doc["main"]["humidity"].as<int>();
+      hasCommunicationError = false;
+      http.end(); // 정상 종료시 자원 해제
+      return; 
+    }
+  }
+  
+  // 에러 발생 케이스 가드: 무조건 자원 해제 보장 및 데이터 초기화
+  http.end();
+  weatherMain = "---";
+  hasCommunicationError = true;
 }
 
 // -------------------------------------------------------------
-// 애니메이션 함수셋 (drawPacman, drawCat, drawBouncingHeart, handleAnimation 동일 유지)
+// 애니메이션 함수셋
 // -------------------------------------------------------------
 void drawPacman(int x, int dir) {
   int baseY = 32;
@@ -377,7 +341,7 @@ void drawBouncingHeart(int x) {
 
 void drawFish(int x, int dir) {
   int baseY = 30;
-  int floatY = baseY + (int)(sin(animFrame * 0.2) * 4); // 32를 중심으로 유영
+  int floatY = baseY + (int)(sin(animFrame * 0.2) * 4); 
   
   if (dir == 1) {
     u8g2.drawDisc(x, floatY, 3);
@@ -389,36 +353,27 @@ void drawFish(int x, int dir) {
 }
 
 void drawRobot(int x) {
-  int baseY = 32; // 기준 높이
-  int bodyH = 6;  // 몸통 높이
-  
-  // 몸통: baseY - 6에서 시작하여 높이 6만큼 그림
-  // 몸통의 하단 Y 좌표는 (baseY - 6) + 6 = baseY가 됨
+  int baseY = 32; 
+  int bodyH = 6;  
   u8g2.drawBox(x - 4, baseY - 6, 8, bodyH); 
-  
-  // 다리 시작 위치를 몸통 하단(baseY)에 딱 붙임
   int legY = baseY; 
   
   if (animFrame % 4 < 2) {
-    u8g2.drawVLine(x - 2, legY, 4); // 왼쪽 다리 굽힘
-    u8g2.drawVLine(x + 2, legY, 6); // 오른쪽 다리 펴짐
+    u8g2.drawVLine(x - 2, legY, 4); 
+    u8g2.drawVLine(x + 2, legY, 6); 
   } else {
-    u8g2.drawVLine(x - 2, legY, 6); // 왼쪽 다리 펴짐
-    u8g2.drawVLine(x + 2, legY, 4); // 오른쪽 다리 굽힘
+    u8g2.drawVLine(x - 2, legY, 6); 
+    u8g2.drawVLine(x + 2, legY, 4); 
   }
-  
-  // 눈 위치 (몸통 내부 중앙쯤으로 조정)
   u8g2.drawPixel(x - 2, baseY - 4); 
   u8g2.drawPixel(x + 2, baseY - 4); 
 }
 
 void drawRollingBall(int x) {
   int baseY = 30;
-  int bounceY = baseY - abs((int)(sin(x * 0.15) * 7)); // 튀어 오르기
+  int bounceY = baseY - abs((int)(sin(x * 0.15) * 7)); 
+  u8g2.drawCircle(x, bounceY, 4); 
   
-  u8g2.drawCircle(x, bounceY, 4); // 공 외곽
-  
-  // 회전하는 내부 + 표시 (animFrame으로 회전각 시뮬레이션)
   if (animFrame % 4 < 2) {
     u8g2.drawVLine(x, bounceY - 3, 7);
     u8g2.drawHLine(x - 3, bounceY, 7);
@@ -428,29 +383,22 @@ void drawRollingBall(int x) {
   }
 }
 
-void drawEyes(int x) { // x는 좌우 이동을 위한 중심값
+void drawEyes(int x) { 
   int baseY = 32;
-  int eyeDist = 8; // 두 눈 사이의 거리
-  
-  // 1. 눈 깜빡임 로직: 50프레임 중 5프레임 동안 눈을 감음
+  int eyeDist = 8; 
   bool isBlinking = (animFrame % 50 < 5);
-  
-  // 2. 눈동자 랜덤 움직임 로직 (매 30프레임마다 변경)
   static int pupilOffset = 0;
   if (animFrame % 30 == 0) {
-    pupilOffset = random(-1, 2); // -1(좌), 0(중앙), 1(우)
+    pupilOffset = random(-1, 2); 
   }
 
-  // 눈 외곽 그리기 (흰자)
   u8g2.drawCircle(x - eyeDist, baseY, 4);
   u8g2.drawCircle(x + eyeDist, baseY, 4);
 
   if (isBlinking) {
-    // 눈을 감았을 때 (가로선)
     u8g2.drawHLine(x - eyeDist - 2, baseY, 5);
     u8g2.drawHLine(x + eyeDist - 2, baseY, 5);
   } else {
-    // 눈을 떴을 때 (눈동자 그리기)
     u8g2.drawPixel(x - eyeDist + pupilOffset, baseY);
     u8g2.drawPixel(x + eyeDist + pupilOffset, baseY);
   }
@@ -458,17 +406,20 @@ void drawEyes(int x) { // x는 좌우 이동을 위한 중심값
 
 void handleAnimation() {
   iconX += iconDirection; animFrame++; 
-  int maxRight = (ANIMATION_MODE == 1) ? 100 : 114; int minLeft = 10; 
+  int maxRight = (ANIMATION_MODE == 1) ? 100 : 114; 
+  int minLeft = 10; 
+  
   if (iconX >= maxRight) { iconX = maxRight; iconDirection = -1; } 
   else if (iconX <= minLeft) { iconX = minLeft; iconDirection = 1; } 
+  
   switch (ANIMATION_MODE) { 
     case 1: drawPacman(iconX, iconDirection); break; 
     case 2: drawCat(iconX, iconDirection); break; 
     case 3: drawBouncingHeart(iconX); break; 
-    case 4: drawFish(iconX, iconDirection); break; // 추가
-    case 5: drawRollingBall(iconX); break;         // 추가
-    case 6: drawRobot(iconX); break;               // 추가
-    case 7: drawEyes(64); break; // 64는 화면 가로 중앙값
+    case 4: drawFish(iconX, iconDirection); break; 
+    case 5: drawRollingBall(iconX); break;         
+    case 6: drawRobot(iconX); break;               
+    case 7: drawEyes(64); break; 
     default: u8g2.drawHLine(iconX - 4, 32, 8); break; 
   }
 }
@@ -476,21 +427,29 @@ void handleAnimation() {
 // -------------------------------------------------------------
 // 메인 디스플레이 출력 함수
 // -------------------------------------------------------------
-void displayAllInfo(struct tm timeinfo) {
+void displayAllInfo(struct tm* timeinfoPtr) {
   u8g2.clearBuffer(); 
   
+  // 1. 시간 렌더링
   char dateTimeBuffer[30]; 
-  sprintf(dateTimeBuffer, "%02d-%02d  %02d:%02d:%02d", 
-          timeinfo.tm_mon + 1, timeinfo.tm_mday, 
-          timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+  if (timeinfoPtr != nullptr) {
+    sprintf(dateTimeBuffer, "%02d-%02d  %02d:%02d:%02d", 
+            timeinfoPtr->tm_mon + 1, timeinfoPtr->tm_mday, 
+            timeinfoPtr->tm_hour, timeinfoPtr->tm_min, timeinfoPtr->tm_sec);
+  } else {
+    strcpy(dateTimeBuffer, "00-00  00:00:00");
+  }
   u8g2.setFont(TIME_FONT);  
   u8g2.drawStr((128 - u8g2.getStrWidth(dateTimeBuffer)) / 2, 20, dateTimeBuffer);
 
+  // 2. 하단 애니메이션
   handleAnimation();
 
+  // 3. 지역명
   u8g2.setFont(u8g2_font_6x10_tf); 
   u8g2.drawStr((128 - u8g2.getStrWidth(currentCity.c_str())) / 2, 44, currentCity.c_str()); 
 
+  // 4. 날씨 정보
   if (weatherMain != "---") {
     char weatherBuffer[35]; 
     sprintf(weatherBuffer, "%s  %.1f\xb0" "C  %d%%", weatherMain.c_str(), temperature, humidity); 
@@ -498,14 +457,13 @@ void displayAllInfo(struct tm timeinfo) {
     u8g2.drawStr((128 - u8g2.getStrWidth(weatherBuffer)) / 2, 58, weatherBuffer); 
   }
 
-  // Serial.println("hasCommunicationError = " + String(hasCommunicationError));
+  // 5. 에러 아이콘
   if (hasCommunicationError) {
     u8g2.setFont(u8g2_font_open_iconic_embedded_1x_t);
     u8g2.drawGlyph(116, 10, 0x0042); 
-    Serial.println("Icon drawGlyph called at 116, 10"); // 실행 여부 확인
   }
 
-  u8g2.sendBuffer();
+  u8g2.sendBuffer(); 
 }
 
 // -------------------------------------------------------------
@@ -514,6 +472,10 @@ void displayAllInfo(struct tm timeinfo) {
 void setup() {
   Serial.begin(115200);
   u8g2.begin();  
+  
+  // 하드웨어 속도 극대화 설정
+  u8g2.setBusClock(4000000); 
+  
   connectWiFi();        
   getCurrentCity();     
   getWeatherData();     
@@ -522,15 +484,21 @@ void setup() {
 
 void loop() {
   unsigned long currentMillis = millis(); 
+  
+  // 날씨 데이터 갱신 (10분 주기)
   if (currentMillis - lastWeatherCheck >= weatherInterval) {
     lastWeatherCheck = currentMillis;
     getWeatherData();
   } 
-  struct tm timeinfo; 
-  if (getLocalTime(&timeinfo)) { 
-    if (currentMillis - lastIconUpdate >= iconInterval) {
-      lastIconUpdate = currentMillis;
-      displayAllInfo(timeinfo); 
+
+  // 깜빡임 원천 차단 타이밍 블록
+  if (currentMillis - lastIconUpdate >= iconInterval) {
+    lastIconUpdate = currentMillis;
+    
+    struct tm timeinfo;
+    // 고속 렌더링 루프 가드
+    if (getLocalTime(&timeinfo, 0)) { // 0ms 타임아웃 세팅으로 대기 지연 원천 차단
+      displayAllInfo(&timeinfo); 
     }
   }
 }
