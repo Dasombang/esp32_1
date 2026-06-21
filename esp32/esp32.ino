@@ -71,12 +71,34 @@ int animFrame = 0;
 // [상태 관리 플래그] 통신 안내 문구가 출력 중일 때는 메인 화면 리프레시를 일시 차단하여 깜빡임 원천 제거
 bool isConnecting = false;
 
+// [공유 데이터 객체]
+static struct tm sharedTimeinfo;
+static SemaphoreHandle_t timeMutex;
+
 // 하위 함수 전방 선언
 void connectWiFi();
 void getCurrentCity();
 void syncTime();
 void getWeatherData();
 void handleAnimation();
+
+// [Core 0: 화면 전용 태스크]
+// 로직과 통신을 완전히 분리하여 Core 1의 지연(Blocking)으로부터 자유롭게 함
+void displayTask(void *pvParameters) {
+  for (;;) {
+    if (!isConnecting) {
+      struct tm localCopy;
+      // 데이터 안정성 확보 (뮤텍스 사용)
+      if (xSemaphoreTake(timeMutex, 10 / portTICK_PERIOD_MS)) {
+        localCopy = sharedTimeinfo;
+        xSemaphoreGive(timeMutex);
+      }
+      displayAllInfo(localCopy);
+    }
+    // 50ms마다 화면 갱신 (애니메이션 20FPS 고정)
+    vTaskDelay(50 / portTICK_PERIOD_MS); 
+  }
+}
 
 // -------------------------------------------------------------
 // UI 전용 함수
@@ -525,44 +547,51 @@ void displayAllInfo(struct tm timeinfo) {
 // 메인 루프 진입부
 // -------------------------------------------------------------
 void setup() {
-  Serial.begin(115200);
+Serial.begin(115200);
   u8g2.begin();
-  // SPI 클럭을 낮추어 데이터 전송 안정성을 높임 (지글거림 방지)
-  u8g2.setBusClock(1000000);    
+  u8g2.setBusClock(1000000); // 1MHz로 고정하여 SPI 지글거림 방지
+  
+  timeMutex = xSemaphoreCreateMutex();
+
   connectWiFi();        
   getCurrentCity();     
   getWeatherData();     
   syncTime();
+
+  // Core 0에 디스플레이 전용 태스크 배치
+  xTaskCreatePinnedToCore(
+    displayTask,
+    "DisplayTask",
+    4096,
+    NULL,
+    1,
+    NULL,
+    0
+  );
 }
 
 void loop() {
   unsigned long currentMillis = millis(); 
   
-  // 1. 날씨 데이터 갱신 (10분 주기, 기존과 동일)
+  // 날씨 데이터 갱신 (네트워크 작업은 Core 1에서 수행)
   if (currentMillis - lastWeatherCheck >= weatherInterval) {
     lastWeatherCheck = currentMillis; 
     getWeatherData();
   } 
   
-  // 2. [수정됨] 화면 갱신 및 애니메이션 (50ms 주기)
-  if (currentMillis - lastIconUpdate >= iconInterval) {
-    lastIconUpdate = currentMillis;
-    
-    if (!isConnecting) {
-      // 시간 데이터는 1초마다 한 번씩만 캐싱해두어 연산 부하 제거
-      static struct tm timeinfo;
-      static unsigned long lastTimeSync = 0;
-      if (currentMillis - lastTimeSync >= 1000) {
-        // 0ms 대기 대신 1ms 타임아웃을 주어 시스템 정지 방지
-        getLocalTime(&timeinfo, 1);
-        lastTimeSync = currentMillis;
+  // 시간 동기화 (1초 단위)
+  static unsigned long lastTimeSync = 0;
+  if (currentMillis - lastTimeSync >= 1000) {
+    struct tm tempInfo;
+    if (getLocalTime(&tempInfo, 100)) { // 100ms 타임아웃
+      if (xSemaphoreTake(timeMutex, 100 / portTICK_PERIOD_MS)) {
+        sharedTimeinfo = tempInfo;
+        xSemaphoreGive(timeMutex);
       }
-      
-      // [근본 해결]
-      // 기존에는 이 안에서 연산과 통신이 혼재되어 지글거림이 발생했습니다.
-      // 이제 여기서 displayAllInfo()를 호출할 때, 
-      // 이 함수가 이전 루프보다 더 빨리 끝나더라도 통신은 50ms마다 딱 한 번만 수행됩니다.
-      displayAllInfo(timeinfo); 
     }
+    lastTimeSync = currentMillis;
   }
+  
+  // Core 1의 부하를 줄여 시스템 전반의 타이밍 안정화
+  delay(10); 
 }
